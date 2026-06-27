@@ -1,0 +1,10 @@
+streamlit
+pymupdf
+sentence-transformers
+faiss-cpu
+ollama
+numpy
+torch
+transformers
+huggingface_hub
+httpx
