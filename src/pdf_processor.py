@@ -6,6 +6,7 @@ Extracts text from academic PDFs while preserving page numbers.
 
 import fitz  # PyMuPDF
 import os
+import re
 
 
 class PDFProcessor:
@@ -18,7 +19,9 @@ class PDFProcessor:
         Clean extracted text.
         """
 
-        text = text.replace("\n", " ")
+        text = re.sub(r"-\n", "", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        text = re.sub(r"(?<!\n)\n(?!\n)", " ", text)
         text = text.replace("\t", " ")
 
         while "  " in text:

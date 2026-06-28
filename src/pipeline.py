@@ -19,6 +19,10 @@ from src.prompt_builder import PromptBuilder
 from src.answer_generator import AnswerGenerator
 from src.citations import CitationGenerator
 from src.confidence import ConfidenceEstimator
+from src.reranker import CrossEncoderReranker
+from src.self_verifier import SelfVerifier
+from src.evaluation import EvaluationTracker
+from config import RERANK_TOP_N
 
 
 class RAGPipeline:
@@ -50,6 +54,10 @@ class RAGPipeline:
         self.answer_generator = AnswerGenerator()
         self.citation_generator = CitationGenerator()
         self.confidence_estimator = ConfidenceEstimator()
+        self.reranker = CrossEncoderReranker()
+        self.verifier = SelfVerifier()
+        self.evaluator = EvaluationTracker()
+        self.conversation_history = []
 
         print("Pipeline Ready.")
         print("=" * 60)
@@ -171,23 +179,46 @@ class RAGPipeline:
 
         retrieval_policy = self.adaptive_retriever.get_policy(question)
 
-        # Semantic Retrieval
-        retrieved_chunks = self.search.search(
+        # Hybrid Retrieval: dense FAISS + BM25-style lexical + keyword scores
+        retrieved_chunks = self.search.hybrid_search(
             question,
             top_k=retrieval_policy["top_k"]
         )
 
-        # BSCO with adaptive retrieval policy
-        selected_chunks = self.optimizer.optimize(
+        similarity_scores = [chunk.get("score", 0.0) for chunk in retrieved_chunks]
+        retrieval_signals = {
+            "similarity_spread": (
+                max(similarity_scores) - min(similarity_scores)
+                if similarity_scores
+                else 0.0
+            ),
+            "document_density": len(retrieved_chunks) / max(self.vector_db.get_stats()["metadata_count"], 1),
+        }
+        retrieval_policy = self.adaptive_retriever.get_policy(question, retrieval_signals)
+
+        reranked_chunks = self.reranker.rerank(
+            question,
             retrieved_chunks,
+            top_n=min(RERANK_TOP_N, len(retrieved_chunks))
+        )
+
+        # BSCO with adaptive retrieval policy
+        selected_chunks, bsco_stats = self.optimizer.optimize(
+            reranked_chunks,
+            question=question,
             threshold=retrieval_policy["threshold"],
-            max_chunks=retrieval_policy["max_chunks"]
+            max_chunks=retrieval_policy["max_chunks"],
+            min_chunks=retrieval_policy["min_chunks"],
+            query_type=retrieval_policy["query_type"],
+            return_stats=True
         )
 
         # Prompt
         prompt = self.prompt_builder.build_prompt(
             question,
-            selected_chunks
+            selected_chunks,
+            query_type=retrieval_policy["query_type"],
+            conversation_history=self.conversation_history
         )
 
         # LLM
@@ -196,16 +227,32 @@ class RAGPipeline:
         # Citations
         citations = self.citation_generator.generate(selected_chunks)
 
+        # Self verification
+        verification = self.verifier.verify(answer["answer"], selected_chunks)
+        verified_answer = verification["answer"]
+
         # Confidence
-        confidence = self.confidence_estimator.calculate(selected_chunks)
+        confidence = self.confidence_estimator.calculate(
+            selected_chunks,
+            citations=citations,
+            verification=verification
+        )
 
         end_time = time.time()
+        response_time = round(end_time - start_time, 2)
+        evaluation = self.evaluator.calculate(
+            reranked_chunks,
+            selected_chunks,
+            bsco_stats,
+            response_time,
+            verified_answer
+        )
 
-        return {
+        result = {
 
             "question": question,
 
-            "answer": answer["answer"],
+            "answer": verified_answer,
 
             "model": answer["model"],
 
@@ -221,12 +268,30 @@ class RAGPipeline:
 
             "retrieval_policy": retrieval_policy,
 
-            "response_time": round(end_time - start_time, 2)
+            "bsco": bsco_stats,
+
+            "verification": verification,
+
+            "evaluation": evaluation,
+
+            "response_time": response_time
 
         }
+
+        self.conversation_history.append(
+            {
+                "question": question,
+                "answer": verified_answer,
+                "confidence": confidence,
+            }
+        )
+        self.conversation_history = self.conversation_history[-5:]
+
+        return result
 
     def get_database_stats(self):
         return self.vector_db.get_stats()
 
     def clear_database(self):
         self.vector_db.clear()
+        self.conversation_history = []

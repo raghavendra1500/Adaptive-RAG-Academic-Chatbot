@@ -16,7 +16,7 @@ from src.pipeline import RAGPipeline
 
 APP_TITLE = "Adaptive RAG Academic Chatbot"
 UPLOAD_DIR = "data"
-PIPELINE_CACHE_VERSION = "2026-06-27-adaptive-dashboard-v2"
+PIPELINE_CACHE_VERSION = "2026-06-28-research-rag-v3"
 
 
 st.set_page_config(
@@ -548,6 +548,9 @@ Supporting Pages:
 Confidence:
 {confidence["level"]} ({confidence["score"]:.4f})
 
+Confidence Explanation:
+{confidence.get("explanation", "Not available.")}
+
 LLM:
 {result["model"]}
 
@@ -615,6 +618,16 @@ def render_answer(result: Dict[str, Any]) -> None:
             """,
             unsafe_allow_html=True
         )
+        st.caption(confidence.get("explanation", ""))
+
+        components = confidence.get("components", {})
+
+        if components:
+            for label, value in components.items():
+                st.progress(
+                    min(max(float(value), 0.0), 1.0),
+                    text=f"{label.replace('_', ' ').title()}: {value:.4f}"
+                )
 
     st.download_button(
         "Download Answer as TXT",
@@ -627,19 +640,47 @@ def render_answer(result: Dict[str, Any]) -> None:
         for rank, chunk in enumerate(result["selected_context"], start=1):
             source = chunk.get("source_file", "Uploaded PDF")
             safe_text = escape(chunk["text"])
+            section = escape(str(chunk.get("section_title") or "Unknown section"))
+            chunk_type = escape(str(chunk.get("chunk_type") or "paragraph"))
 
             st.markdown(
                 f"""
                 <div class="card">
                     <div class="metric-label">
                         Rank {rank} | Page {chunk['page_number']} |
-                        Score {chunk['score']:.4f} | {escape(source)}
+                        Score {chunk['score']:.4f} | {escape(source)} |
+                        {section} | {chunk_type}
                     </div>
                     <div class="answer-text">{safe_text}</div>
                 </div>
                 """,
                 unsafe_allow_html=True
             )
+
+    with st.expander("Research Metrics", expanded=False):
+        bsco = result.get("bsco", {})
+        evaluation = result.get("evaluation", {})
+        verification = result.get("verification", {})
+
+        metric_cols = st.columns(4)
+        metric_cols[0].metric("Initial Tokens", bsco.get("initial_tokens", 0))
+        metric_cols[1].metric("Final Tokens", bsco.get("final_tokens", 0))
+        metric_cols[2].metric("Token Reduction", bsco.get("token_reduction", 0))
+        metric_cols[3].metric(
+            "Context Reduction",
+            f"{bsco.get('context_reduction_percent', 0.0)}%"
+        )
+
+        st.json(
+            {
+                "bsco": bsco,
+                "evaluation": evaluation,
+                "verification": {
+                    "score": verification.get("score", 0.0),
+                    "unsupported_statements": verification.get("unsupported_statements", []),
+                },
+            }
+        )
 
     if st.session_state.preview_page is not None:
         st.markdown("#### Page Preview")

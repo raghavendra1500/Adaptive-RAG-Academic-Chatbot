@@ -39,6 +39,53 @@ class AdaptiveChunker:
             if s.strip()
         ]
 
+    def split_into_blocks(self, text):
+        """Split extracted page text into structure-aware blocks."""
+
+        raw_blocks = re.split(r"\n{2,}|(?<=\.)\s+(?=[A-Z][A-Za-z ]{2,}:)", text)
+        blocks = []
+        current_section = None
+
+        for raw_block in raw_blocks:
+            block = raw_block.strip()
+
+            if not block:
+                continue
+
+            block_type = self.detect_block_type(block)
+
+            if block_type == "heading":
+                current_section = block[:120]
+
+            blocks.append(
+                {
+                    "text": block,
+                    "type": block_type,
+                    "section_title": current_section,
+                }
+            )
+
+        return blocks
+
+    def detect_block_type(self, text):
+        """Classify a text block from academic PDF extraction."""
+
+        stripped = text.strip()
+
+        if re.match(r"^(\d+(\.\d+)*\.?\s+)?[A-Z][A-Z0-9\s\-:]{4,}$", stripped) and len(stripped) < 140:
+            return "heading"
+
+        if re.match(r"^(\u2022|-|\*|\d+\.|\([a-zA-Z0-9]\))\s+", stripped):
+            return "list"
+
+        if re.search(r"\b(table|figure|fig\.)\s*\d+", stripped.lower()):
+            return "figure_or_table"
+
+        if stripped.count("|") >= 2 or len(re.findall(r"\s{2,}", stripped)) >= 3:
+            return "table"
+
+        return "paragraph"
+
     def adaptive_chunking(self, pages):
 
         chunks = []
@@ -49,59 +96,92 @@ class AdaptiveChunker:
 
             page_number = page["page_number"]
 
-            sentences = self.split_into_sentences(
-                page["text"]
-            )
+            source_file = page.get("source_file", "Uploaded PDF")
+            blocks = self.split_into_blocks(page["text"])
 
             current_chunk = ""
+            current_types = []
+            current_section = None
 
-            for sentence in sentences:
+            for block in blocks:
+                block_text = block["text"]
+                block_units = (
+                    [block_text]
+                    if block["type"] in {"heading", "list", "table", "figure_or_table"}
+                    else self.split_into_sentences(block_text)
+                )
 
-                # Sentence fits
+                for sentence in block_units:
 
-                if len(current_chunk) + len(sentence) <= self.max_size:
+                    if not sentence:
+                        continue
 
-                    current_chunk += " " + sentence
+                    if block["type"] == "heading" and current_chunk:
+                        chunks.append(self._make_chunk(
+                            chunk_id,
+                            page_number,
+                            current_chunk,
+                            source_file,
+                            current_types,
+                            current_section
+                        ))
+                        chunk_id += 1
+                        current_chunk = ""
+                        current_types = []
 
-                else:
+                    current_section = block.get("section_title") or current_section
 
-                    chunks.append({
+                    if len(current_chunk) + len(sentence) <= self.max_size:
+                        current_chunk += " " + sentence
+                        current_types.append(block["type"])
+                    else:
+                        if current_chunk and len(current_chunk) >= self.min_size:
+                            chunks.append(self._make_chunk(
+                                chunk_id,
+                                page_number,
+                                current_chunk,
+                                source_file,
+                                current_types,
+                                current_section
+                            ))
+                            chunk_id += 1
+                            overlap_text = current_chunk[-self.overlap:]
+                            current_chunk = overlap_text + " " + sentence
+                            current_types = [block["type"]]
+                        else:
+                            current_chunk += " " + sentence
+                            current_types.append(block["type"])
 
-                        "chunk_id": chunk_id,
-
-                        "page_number": page_number,
-
-                        "text": current_chunk.strip(),
-
-                        "length": len(current_chunk)
-
-                    })
-
-                    chunk_id += 1
-
-                    # overlap
-
-                    overlap_text = current_chunk[-self.overlap:]
-
-                    current_chunk = overlap_text + " " + sentence
-
-            if current_chunk:
-
-                chunks.append({
-
-                    "chunk_id": chunk_id,
-
-                    "page_number": page_number,
-
-                    "text": current_chunk.strip(),
-
-                    "length": len(current_chunk)
-
-                })
+            if current_chunk.strip():
+                chunks.append(self._make_chunk(
+                    chunk_id,
+                    page_number,
+                    current_chunk,
+                    source_file,
+                    current_types,
+                    current_section
+                ))
 
                 chunk_id += 1
 
         return chunks
+
+    def _make_chunk(self, chunk_id, page_number, text, source_file, chunk_types, section_title):
+        type_counts = {
+            chunk_type: chunk_types.count(chunk_type)
+            for chunk_type in set(chunk_types)
+        }
+        dominant_type = max(type_counts, key=type_counts.get) if type_counts else "paragraph"
+
+        return {
+            "chunk_id": chunk_id,
+            "page_number": page_number,
+            "source_file": source_file,
+            "section_title": section_title,
+            "chunk_type": dominant_type,
+            "text": text.strip(),
+            "length": len(text)
+        }
 
     def chunk_pages(self, pages):
         """

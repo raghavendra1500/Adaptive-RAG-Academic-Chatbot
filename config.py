@@ -66,6 +66,18 @@ TOP_K = 10
 # ==========================================================
 
 SIMILARITY_THRESHOLD = 0.70
+MAX_CONTEXT_TOKENS = 1400
+MIN_CONTEXT_COVERAGE = 0.62
+
+# ==========================================================
+# Hybrid Retrieval and Reranking
+# ==========================================================
+
+HYBRID_DENSE_WEIGHT = 0.55
+HYBRID_BM25_WEIGHT = 0.30
+HYBRID_KEYWORD_WEIGHT = 0.15
+RERANK_TOP_N = 12
+CROSS_ENCODER_MODEL = None
 
 # ==========================================================
 # Ollama
